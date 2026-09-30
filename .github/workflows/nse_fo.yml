@@ -5,54 +5,155 @@ on:
   schedule:
     - cron: "50 10 * * 1-5"
 
+permissions:
+  contents: write
+
 jobs:
   update:
     runs-on: ubuntu-latest
 
     steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download NSE F&O data
         run: |
-          DATE=$(date -u +%Y%m%d)
+          python - <<'PY'
+          import requests
+          import datetime
+          import os
 
-          URL="https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${DATE}_F_0000.csv.zip"
+          today = datetime.date.today()
 
-          echo "Downloading: $URL"
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": "Mozilla/5.0",
+              "Accept": "*/*"
+          })
 
-          curl -L --fail \
-            -A "Mozilla/5.0" \
-            "$URL" \
-            -o nse_fo.zip
+          downloaded = False
 
-          echo "Downloaded successfully"
-          ls -lh nse_fo.zip
+          for days_back in range(0, 7):
 
-      - name: Extract NSE file
+              date = today - datetime.timedelta(days=days_back)
+
+              # Skip Saturday and Sunday
+              if date.weekday() >= 5:
+                  continue
+
+              date_str = date.strftime("%Y%m%d")
+
+              url = (
+                  "https://nsearchives.nseindia.com/content/fo/"
+                  f"BhavCopy_NSE_FO_0_0_0_{date_str}_F_0000.csv.zip"
+              )
+
+              print("Trying:", url)
+
+              r = session.get(url, timeout=30)
+
+              if r.status_code == 200 and len(r.content) > 10000:
+                  print("Downloaded:", date_str)
+
+                  with open("nse_fo.zip", "wb") as f:
+                      f.write(r.content)
+
+                  with open("nse_date.txt", "w") as f:
+                      f.write(date_str)
+
+                  downloaded = True
+                  break
+
+          if not downloaded:
+              raise Exception("Could not find a recent NSE F&O bhavcopy")
+          PY
+
+      - name: Extract NSE data
         run: |
           mkdir -p extracted
           unzip -o nse_fo.zip -d extracted
-          echo "Extracted files:"
-          find extracted -type f
 
-      - name: Show NSE columns
+      - name: Create stock futures CSV
         run: |
-          echo "Checking downloaded CSV..."
           python - <<'PY'
           import csv
           import glob
+          import os
 
           files = glob.glob("extracted/*.csv")
 
           if not files:
-              raise Exception("No CSV file found")
+              raise Exception("No NSE CSV found")
 
-          file = files[0]
+          source = files[0]
 
-          with open(file, "r", encoding="utf-8-sig", errors="replace") as f:
-              reader = csv.reader(f)
-              header = next(reader)
+          print("Source:", source)
 
-          print("CSV FILE:", file)
-          print("COLUMNS:")
-          for i, col in enumerate(header):
-              print(i, repr(col))
+          with open(source, "r", encoding="utf-8-sig", errors="replace") as f:
+              reader = csv.DictReader(f)
+
+              print("Columns:")
+              print(reader.fieldnames)
+
+              output_rows = []
+
+              for row in reader:
+
+                  instrument = row.get("FinInstrmTp", "").strip()
+
+                  # STF = Stock Futures
+                  if instrument != "STF":
+                      continue
+
+                  output_rows.append({
+                      "TradDt": row.get("TradDt", ""),
+                      "TckrSymb": row.get("TckrSymb", ""),
+                      "XpryDt": row.get("XpryDt", ""),
+                      "ClsPric": row.get("ClsPric", ""),
+                      "PrvsClsgPric": row.get("PrvsClsgPric", ""),
+                      "NewBrdLotQty": row.get("NewBrdLotQty", ""),
+                      "FinInstrmTp": instrument,
+                      "FinInstrmId": row.get("FinInstrmId", "")
+                  })
+
+          os.makedirs("data", exist_ok=True)
+
+          output = "data/nse_fo_stock_futures.csv"
+
+          fields = [
+              "TradDt",
+              "TckrSymb",
+              "XpryDt",
+              "ClsPric",
+              "PrvsClsgPric",
+              "NewBrdLotQty",
+              "FinInstrmTp",
+              "FinInstrmId"
+          ]
+
+          with open(output, "w", newline="", encoding="utf-8") as f:
+              writer = csv.DictWriter(f, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(output_rows)
+
+          print("Created:", output)
+          print("Stock futures rows:", len(output_rows))
           PY
+
+      - name: Show sample
+        run: |
+          echo "===== NSE STOCK FUTURES ====="
+          head -n 10 data/nse_fo_stock_futures.csv
+
+      - name: Save updated data
+        run: |
+          git config user.name "NSE F&O Scanner"
+          git config user.email "actions@github.com"
+
+          git add data/nse_fo_stock_futures.csv
+
+          git diff --cached --quiet || \
+            git commit -m "Update NSE F&O stock futures data"
+
+          git push
