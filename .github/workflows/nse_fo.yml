@@ -1,0 +1,58 @@
+name: Update NSE F&O Data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "50 10 * * 1-5"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download NSE F&O data
+        run: |
+          DATE=$(date -u +%Y%m%d)
+
+          URL="https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_${DATE}_F_0000.csv.zip"
+
+          echo "Downloading: $URL"
+
+          curl -L --fail \
+            -A "Mozilla/5.0" \
+            "$URL" \
+            -o nse_fo.zip
+
+          echo "Downloaded successfully"
+          ls -lh nse_fo.zip
+
+      - name: Extract NSE file
+        run: |
+          mkdir -p extracted
+          unzip -o nse_fo.zip -d extracted
+          echo "Extracted files:"
+          find extracted -type f
+
+      - name: Show NSE columns
+        run: |
+          echo "Checking downloaded CSV..."
+          python - <<'PY'
+          import csv
+          import glob
+
+          files = glob.glob("extracted/*.csv")
+
+          if not files:
+              raise Exception("No CSV file found")
+
+          file = files[0]
+
+          with open(file, "r", encoding="utf-8-sig", errors="replace") as f:
+              reader = csv.reader(f)
+              header = next(reader)
+
+          print("CSV FILE:", file)
+          print("COLUMNS:")
+          for i, col in enumerate(header):
+              print(i, repr(col))
+          PY
